@@ -17,6 +17,7 @@ class Config(mlfab.Config):
     pixels: int = mlfab.field(1024)
     hidden_dims: int = mlfab.field(256)
     num_layers: int = mlfab.field(3)
+    num_rotations: int = mlfab.field(8)
 
     # Training arguments.
     batch_size: int = mlfab.field(256)
@@ -28,13 +29,14 @@ class Config(mlfab.Config):
 
 
 class TaskDataset(Dataset[np.ndarray, np.ndarray]):
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, num_classes: int) -> None:
         super().__init__()
 
         self.pixels = config.pixels
+        self.num_classes = num_classes
 
-    def next(self) -> np.ndarray:
-        return np.random.randint(0, self.pixels - 1, (2,))
+    def next(self) -> tuple[np.ndarray, np.ndarray]:
+        return np.random.randint(0, self.pixels - 1, (2,)), np.random.randint(self.num_classes)
 
 
 class Task(mlfab.Task[Config], mlfab.ResetParameters):
@@ -42,10 +44,10 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
         super().__init__(config)
 
         # Gets the target image.
-        self.register_buffer("target", torch.empty((config.pixels, config.pixels, 3)))
+        self.register_buffer("target", torch.empty((config.num_rotations, config.pixels, config.pixels, 3)))
 
         self.model = nn.Sequential(
-            nn.Linear(2, config.hidden_dims),
+            nn.Linear(2 + config.num_rotations, config.hidden_dims),
             nn.LeakyReLU(),
             *(
                 nn.Sequential(
@@ -58,32 +60,39 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
         )
 
     def reset_parameters(self) -> None:
-        image = torch.from_numpy(get_image(self.config.pixels).astype(np.float32)).flipud()
-        self.target.copy_(image)
+        for i in range(self.config.num_rotations):
+            image_arr = get_image(self.config.pixels, rotation=i * 360 / self.config.num_rotations)
+            image = torch.from_numpy(image_arr.astype(np.float32)).flipud()
+            self.target[i].copy_(image)
 
     def get_dataset(self, phase: mlfab.Phase) -> TaskDataset:
-        return TaskDataset(self.config)
+        return TaskDataset(self.config, self.config.num_rotations)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.model(x)
 
-    def get_loss(self, batch: Tensor, state: mlfab.State) -> Tensor:
-        pixels = batch
+    def get_loss(self, batch: tuple[Tensor, Tensor], state: mlfab.State) -> Tensor:
+        pixels, cl = batch
         x = pixels.float() / self.config.pixels * 2 - 1
-        y = self.target[pixels[:, 0], pixels[:, 1]]
+        x_cl = F.one_hot(cl, self.config.num_rotations).float()
+        x = torch.cat([x, x_cl], dim=-1)
+        y = self.target[cl, pixels[:, 0], pixels[:, 1]]
         yhat = self(x)
         self.log_step(batch, yhat, state)
         loss = F.binary_cross_entropy_with_logits(yhat, y.float())
         return loss
 
-    def log_valid_step(self, batch: Tensor, output: Tensor, state: mlfab.State) -> None:
+    def log_valid_step(self, batch: tuple[Tensor, Tensor], output: Tensor, state: mlfab.State) -> None:
         """Logts the currently-generated image."""
+        pixels, cl = batch
 
         def get_image() -> Tensor:
-            idxs = torch.arange(self.config.pixels, device=batch.device)
+            idxs = torch.arange(self.config.pixels, device=pixels.device)
             px, py = torch.meshgrid(idxs, idxs)
             pxy = torch.stack([px, py], dim=-1)
             x = pxy.flatten(0, 1).float() / self.config.pixels * 2 - 1
+            x_cl = F.one_hot(cl[:1], self.config.num_rotations).float().expand((x.shape[0], -1))
+            x = torch.cat([x, x_cl], dim=-1)
             yhat = self(x)
             xy = yhat.view(self.config.pixels, self.config.pixels, 3).sigmoid()
             return xy
