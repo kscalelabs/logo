@@ -17,12 +17,14 @@ class Config(mlfab.Config):
     pixels: int = mlfab.field(1024)
     hidden_dims: int = mlfab.field(256)
     num_layers: int = mlfab.field(3)
+
     # Training arguments.
     batch_size: int = mlfab.field(256)
     learning_rate: float = mlfab.field(1e-3)
     betas: tuple[float, float] = mlfab.field((0.9, 0.999))
     weight_decay: float = mlfab.field(1e-4)
     warmup_steps: int = mlfab.field(100)
+    valid_every_n_seconds: float = mlfab.field(10)
 
 
 class TaskDataset(Dataset[np.ndarray, np.ndarray]):
@@ -56,7 +58,7 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
         )
 
     def reset_parameters(self) -> None:
-        image = torch.from_numpy(get_image(self.config.pixels).astype(np.float32))
+        image = torch.from_numpy(get_image(self.config.pixels).astype(np.float32)).flipud()
         self.target.copy_(image)
 
     def get_dataset(self, phase: mlfab.Phase) -> TaskDataset:
