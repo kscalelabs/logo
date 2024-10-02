@@ -47,11 +47,11 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
 
         self.model = nn.Sequential(
             nn.Linear(2, config.hidden_dims),
-            nn.LeakyReLU(),
+            nn.Tanh(),
             *(
                 nn.Sequential(
                     nn.Linear(config.hidden_dims, config.hidden_dims),
-                    nn.LeakyReLU(),
+                    nn.Tanh(),
                 )
                 for _ in range(config.num_layers - 1)
             ),
