@@ -1,12 +1,15 @@
 """Trains a neural network to generate the logo."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import mlfab
 import numpy as np
 import torch
 import torch.nn.functional as F
+import tqdm
 from dpshdl.dataset import Dataset
+from PIL import Image as PILImage
 from torch import Tensor, nn
 
 from logo.plot import get_image
@@ -18,6 +21,8 @@ class Config(mlfab.Config):
     upsample_pixels: int = mlfab.field(1024)
     hidden_dims: int = mlfab.field(256)
     num_layers: int = mlfab.field(3)
+    load_image_from_file: str | None = mlfab.field(None)
+    use_tanh: bool = mlfab.field(False)
 
     # Training arguments.
     batch_size: int = mlfab.field(256)
@@ -42,16 +47,19 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
 
+        self.image_file = config.load_image_from_file
+
         # Gets the target image.
         self.register_buffer("target", torch.empty((config.pixels, config.pixels, 3)))
 
+        act = nn.Tanh() if config.use_tanh else nn.LeakyReLU()
         self.model = nn.Sequential(
             nn.Linear(2, config.hidden_dims),
-            nn.LeakyReLU(),
+            act,
             *(
                 nn.Sequential(
                     nn.Linear(config.hidden_dims, config.hidden_dims),
-                    nn.LeakyReLU(),
+                    act,
                 )
                 for _ in range(config.num_layers - 1)
             ),
@@ -59,9 +67,23 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
         )
 
     def reset_parameters(self) -> None:
-        image_arr = 1 - get_image(self.config.pixels)
-        image = torch.from_numpy(image_arr.astype(np.float32)).flipud()
-        self.target.copy_(image)
+        if self.config.load_image_from_file is None:
+            image_arr = 1 - get_image(self.config.pixels)
+            image = torch.from_numpy(image_arr.astype(np.float32)).flipud()
+            self.target.copy_(image)
+        else:
+            image_path = Path(self.config.load_image_from_file)
+            pil_image = PILImage.open(image_path)
+            image_arr = np.array(pil_image)
+            assert image_arr.ndim == 3
+            assert image_arr.shape[-1] == 3, f"Expected RGB image, got shape {image_arr.shape}"
+            image = torch.from_numpy(image_arr.astype(np.float32))
+            image = (image.float() / 255.0).permute(2, 0, 1)
+            image = F.interpolate(image[None], (self.config.pixels, self.config.pixels), mode="bilinear").squeeze(0)
+            image = image.permute(1, 2, 0)
+            self.target.copy_(image.squeeze(0).squeeze(0))
+
+        self.log_image("target", self.target)
 
     def get_dataset(self, phase: mlfab.Phase) -> TaskDataset:
         return TaskDataset(self.config)
@@ -80,18 +102,28 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
 
     def log_valid_step(self, batch: Tensor, output: Tensor, state: mlfab.State) -> None:
         """Logts the currently-generated image."""
-        pixels = batch
 
         def get_image() -> Tensor:
-            idxs = torch.arange(self.config.upsample_pixels, device=pixels.device)
-            px, py = torch.meshgrid(idxs, idxs)
-            pxy = torch.stack([px, py], dim=-1)
-            x = pxy.flatten(0, 1).float() / self.config.upsample_pixels * 2 - 1
-            yhat = self(x)
-            xy = yhat.view(self.config.upsample_pixels, self.config.upsample_pixels, 3).sigmoid()
-            return xy
+            return self.render(batch.device, self.config.upsample_pixels)
 
         self.log_image("image", get_image)
+
+    def render(self, device: torch.device, pixels: int, num_chunks: int | None = None) -> np.ndarray:
+        idxs = torch.arange(pixels).to(device)
+        px, py = torch.meshgrid(idxs, idxs)
+        pxy = torch.stack([px, py], dim=-1)
+        x = pxy.flatten(0, 1).float() / pixels * 2 - 1
+        with torch.inference_mode():
+            if num_chunks is None:
+                yhat = self(x).sigmoid()
+            else:
+                yhats = []
+                for x_chunk in tqdm.tqdm(x.chunk(num_chunks)):
+                    yhat_chunk = self(x_chunk)
+                    yhats.append(yhat_chunk)
+                yhat = torch.cat(yhats, dim=0)
+        xy = yhat.view(pixels, pixels, 3).sigmoid()
+        return xy
 
 
 if __name__ == "__main__":

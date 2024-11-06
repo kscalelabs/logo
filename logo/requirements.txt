@@ -4,3 +4,4 @@
 mlfab
 dpshdl
 torchvision
+tqdm
