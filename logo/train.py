@@ -30,7 +30,7 @@ class Config(mlfab.Config):
     betas: tuple[float, float] = mlfab.field((0.9, 0.999))
     weight_decay: float = mlfab.field(1e-4)
     warmup_steps: int = mlfab.field(100)
-    valid_every_n_seconds: float = mlfab.field(10)
+    valid_every_n_seconds: float | None = mlfab.field(10)
 
 
 class TaskDataset(Dataset[np.ndarray, np.ndarray]):
