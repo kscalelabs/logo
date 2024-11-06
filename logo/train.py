@@ -1,12 +1,14 @@
 """Trains a neural network to generate the logo."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import mlfab
 import numpy as np
 import torch
 import torch.nn.functional as F
 from dpshdl.dataset import Dataset
+from PIL import Image as PILImage
 from torch import Tensor, nn
 
 from logo.plot import get_image
@@ -18,6 +20,8 @@ class Config(mlfab.Config):
     upsample_pixels: int = mlfab.field(1024)
     hidden_dims: int = mlfab.field(256)
     num_layers: int = mlfab.field(3)
+    load_image_from_file: str | None = mlfab.field(None)
+    use_tanh: bool = mlfab.field(False)
 
     # Training arguments.
     batch_size: int = mlfab.field(256)
@@ -42,16 +46,19 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
 
+        self.image_file = config.load_image_from_file
+
         # Gets the target image.
         self.register_buffer("target", torch.empty((config.pixels, config.pixels, 3)))
 
+        act = nn.Tanh() if config.use_tanh else nn.LeakyReLU()
         self.model = nn.Sequential(
             nn.Linear(2, config.hidden_dims),
-            nn.Tanh(),
+            act,
             *(
                 nn.Sequential(
                     nn.Linear(config.hidden_dims, config.hidden_dims),
-                    nn.Tanh(),
+                    act,
                 )
                 for _ in range(config.num_layers - 1)
             ),
@@ -59,9 +66,23 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
         )
 
     def reset_parameters(self) -> None:
-        image_arr = 1 - get_image(self.config.pixels)
-        image = torch.from_numpy(image_arr.astype(np.float32)).flipud()
-        self.target.copy_(image)
+        if self.config.load_image_from_file is None:
+            image_arr = 1 - get_image(self.config.pixels)
+            image = torch.from_numpy(image_arr.astype(np.float32)).flipud()
+            self.target.copy_(image)
+        else:
+            image_path = Path(self.config.load_image_from_file)
+            pil_image = PILImage.open(image_path)
+            image_arr = np.array(pil_image)
+            assert image_arr.ndim == 3
+            assert image_arr.shape[-1] == 3, f"Expected RGB image, got shape {image_arr.shape}"
+            image = torch.from_numpy(image_arr.astype(np.float32))
+            image = (image.float() / 255.0).permute(2, 0, 1)
+            image = F.interpolate(image[None], (self.config.pixels, self.config.pixels), mode="bilinear").squeeze(0)
+            image = image.permute(1, 2, 0)
+            self.target.copy_(image.squeeze(0).squeeze(0))
+
+        self.log_image("target", self.target)
 
     def get_dataset(self, phase: mlfab.Phase) -> TaskDataset:
         return TaskDataset(self.config)
