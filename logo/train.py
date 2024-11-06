@@ -7,6 +7,7 @@ import mlfab
 import numpy as np
 import torch
 import torch.nn.functional as F
+import tqdm
 from dpshdl.dataset import Dataset
 from PIL import Image as PILImage
 from torch import Tensor, nn
@@ -101,18 +102,28 @@ class Task(mlfab.Task[Config], mlfab.ResetParameters):
 
     def log_valid_step(self, batch: Tensor, output: Tensor, state: mlfab.State) -> None:
         """Logts the currently-generated image."""
-        pixels = batch
 
         def get_image() -> Tensor:
-            idxs = torch.arange(self.config.upsample_pixels, device=pixels.device)
-            px, py = torch.meshgrid(idxs, idxs)
-            pxy = torch.stack([px, py], dim=-1)
-            x = pxy.flatten(0, 1).float() / self.config.upsample_pixels * 2 - 1
-            yhat = self(x)
-            xy = yhat.view(self.config.upsample_pixels, self.config.upsample_pixels, 3).sigmoid()
-            return xy
+            return self.render(batch.device, self.config.upsample_pixels)
 
         self.log_image("image", get_image)
+
+    def render(self, device: torch.device, pixels: int, num_chunks: int | None = None) -> np.ndarray:
+        idxs = torch.arange(pixels).to(device)
+        px, py = torch.meshgrid(idxs, idxs)
+        pxy = torch.stack([px, py], dim=-1)
+        x = pxy.flatten(0, 1).float() / pixels * 2 - 1
+        with torch.inference_mode():
+            if num_chunks is None:
+                yhat = self(x).sigmoid()
+            else:
+                yhats = []
+                for x_chunk in tqdm.tqdm(x.chunk(num_chunks)):
+                    yhat_chunk = self(x_chunk)
+                    yhats.append(yhat_chunk)
+                yhat = torch.cat(yhats, dim=0)
+        xy = yhat.view(pixels, pixels, 3).sigmoid()
+        return xy
 
 
 if __name__ == "__main__":
