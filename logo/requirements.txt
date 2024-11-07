@@ -1,6 +1,6 @@
 # requirements.txt
 
-
+opencv-python
 mlfab
 dpshdl
 torchvision
