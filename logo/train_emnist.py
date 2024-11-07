@@ -24,7 +24,7 @@ class Config(mlfab.Config):
     period_scale: float = mlfab.field(1.0)
 
     # Training arguments.
-    batch_size: int = mlfab.field(16)
+    batch_size: int = mlfab.field(256)
     learning_rate: float = mlfab.field(3e-4)
     betas: tuple[float, float] = mlfab.field((0.9, 0.999))
     weight_decay: float = mlfab.field(1e-4)
