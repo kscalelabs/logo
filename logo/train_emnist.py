@@ -15,19 +15,19 @@ from torchvision.datasets.mnist import EMNIST as BaseEMNIST  # noqa: N811
 class Config(mlfab.Config):
     hidden_dims: int = mlfab.field(512)
     kl_latent_dims: int = mlfab.field(32)
-    num_layers: int = mlfab.field(5)
+    num_layers: int = mlfab.field(4)
     use_tanh: bool = mlfab.field(False)
     num_xy_enc: int = mlfab.field(16)
     num_time_enc: int = mlfab.field(16)
     num_label_enc: int = mlfab.field(16)
     sampling_timesteps: int = mlfab.field(100)
-    period_scale: float = mlfab.field(100.0)
+    period_scale: float = mlfab.field(1.0)
 
     # Training arguments.
-    batch_size: int = mlfab.field(256)
-    learning_rate: float = mlfab.field(1e-4)
-    betas: tuple[float, float] = mlfab.field((0.9, 0.99))
-    weight_decay: float = mlfab.field(1e-5)
+    batch_size: int = mlfab.field(16)
+    learning_rate: float = mlfab.field(3e-4)
+    betas: tuple[float, float] = mlfab.field((0.9, 0.999))
+    weight_decay: float = mlfab.field(1e-4)
     warmup_steps: int = mlfab.field(100)
 
     max_steps: int = mlfab.field(100000)
@@ -51,8 +51,9 @@ class EMNIST(Dataset[np.ndarray, int]):
         letters, labels = self.ds[idx]
         letters = np.rot90(letters)
         letters = np.flipud(letters)
-        # letters = letters * 2 - 1  # Normalize to [-1, 1]
-        return np.array(letters).astype(np.float32) / 255.0, labels
+        letters = np.array(letters).astype(np.float32) / 255.0
+        letters = letters - 0.5  # Normalize to [-0.5, 0.5]
+        return letters, labels
 
 
 CLASSES = [
@@ -103,13 +104,14 @@ class Task(mlfab.Task[Config]):
 
         self.diff = TaskModel()
 
+        self.xy_enc = mlfab.FourierEmbeddings(config.num_xy_enc)
         self.time_enc = mlfab.FourierEmbeddings(config.num_time_enc)
         self.label_enc = nn.Embedding(len(CLASSES), config.num_label_enc)
 
         # Encoder network with Layer Normalization
         self.model = nn.Sequential(
             nn.Linear(
-                1 + 2 + config.num_time_enc + config.num_label_enc,
+                1 + 2 * config.num_xy_enc + config.num_time_enc + config.num_label_enc,
                 config.hidden_dims,
             ),
             act(),
@@ -139,6 +141,7 @@ class Task(mlfab.Task[Config]):
         py_xy = py_xy.to(x.device) / npy * 2 - 1 * self.config.period_scale
         pxy_xy2 = torch.stack([px_xy, py_xy], dim=-1)
         pxy_n2 = pxy_xy2[None].expand(bsz, npx, npy, 2).flatten(0, 2)
+        pxy_nt = self.xy_enc(pxy_n2.flatten()).unflatten(0, (-1, 2)).flatten(1, 2)
 
         # Gets the time and label embeddings.
         t_bt = self.time_enc(t)
@@ -146,7 +149,7 @@ class Task(mlfab.Task[Config]):
         l_bt = self.label_enc(labels)
         l_nt = l_bt[:, None, None, :].expand(bsz, npx, npy, -1).flatten(0, 2)
         x_n1 = x.flatten(0, 2).unsqueeze(1)
-        x_nt = torch.cat([x_n1, pxy_n2, t_nt, l_nt], dim=-1)
+        x_nt = torch.cat([x_n1, pxy_nt, t_nt, l_nt], dim=-1)
 
         # Runs the model.
         dx_nt = self.model(x_nt)
@@ -156,10 +159,7 @@ class Task(mlfab.Task[Config]):
 
     def get_loss(self, batch: tuple[Tensor, Tensor], state: mlfab.State) -> Tensor:
         letters, labels = batch
-        loss = self.diff.loss(
-            functools.partial(self.diffusion_step, labels=labels),
-            letters
-        )
+        loss = self.diff.loss(functools.partial(self.diffusion_step, labels=labels), letters)
         self.log_step(batch, loss, state)
         return loss
 
@@ -177,8 +177,8 @@ class Task(mlfab.Task[Config]):
         )[0]
         images_b1hw = images_bhw.unsqueeze(1)
 
-        self.log_images("yhat", images_b1hw)
-        self.log_images("y", letters_bhw.unsqueeze(1))
+        self.log_images("yhat", (images_b1hw + 0.5).clamp(0, 1))
+        self.log_images("y", (letters_bhw + 0.5).clamp(0, 1))
 
 
 if __name__ == "__main__":
