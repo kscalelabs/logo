@@ -2,22 +2,20 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Callable
 
 import mlfab
 import numpy as np
 import torch
 from dpshdl.dataset import Dataset
-from mlfab.nn.functions import append_dims
 from torch import Tensor, nn
 from torchvision.datasets.mnist import EMNIST as BaseEMNIST  # noqa: N811
 
 
 @dataclass
 class Config(mlfab.Config):
-    hidden_dims: int = mlfab.field(256)
+    hidden_dims: int = mlfab.field(512)
     kl_latent_dims: int = mlfab.field(32)
-    num_layers: int = mlfab.field(3)
+    num_layers: int = mlfab.field(5)
     use_tanh: bool = mlfab.field(False)
     num_xy_enc: int = mlfab.field(16)
     num_time_enc: int = mlfab.field(16)
@@ -28,7 +26,7 @@ class Config(mlfab.Config):
     # Training arguments.
     batch_size: int = mlfab.field(256)
     learning_rate: float = mlfab.field(1e-4)
-    betas: tuple[float, float] = mlfab.field((0.9, 0.95))
+    betas: tuple[float, float] = mlfab.field((0.9, 0.99))
     weight_decay: float = mlfab.field(1e-5)
     warmup_steps: int = mlfab.field(100)
 
@@ -88,7 +86,7 @@ CLASSES = [
 ]
 
 
-class TaskModel(mlfab.ConsistencyModel):
+class TaskModel(mlfab.GaussianDiffusion):
     def get_noise(self, x: Tensor) -> Tensor:
         noise = torch.randn(x.size(0), device=x.device, dtype=x.dtype)
         for _ in range(x.ndim - 1):
@@ -103,26 +101,21 @@ class Task(mlfab.Task[Config]):
         # Define activation function
         act = nn.Tanh if config.use_tanh else nn.LeakyReLU
 
-        self.diff = TaskModel(
-            total_steps=config.max_steps,
-        )
+        self.diff = TaskModel()
 
-        self.xy_enc = mlfab.FourierEmbeddings(config.num_xy_enc)
         self.time_enc = mlfab.FourierEmbeddings(config.num_time_enc)
         self.label_enc = nn.Embedding(len(CLASSES), config.num_label_enc)
 
         # Encoder network with Layer Normalization
         self.model = nn.Sequential(
             nn.Linear(
-                1 + 2 * config.num_xy_enc + config.num_time_enc + config.num_label_enc,
+                1 + 2 + config.num_time_enc + config.num_label_enc,
                 config.hidden_dims,
             ),
-            nn.LayerNorm(config.hidden_dims),
             act(),
             *(
                 nn.Sequential(
                     nn.Linear(config.hidden_dims, config.hidden_dims),
-                    nn.LayerNorm(config.hidden_dims),
                     act(),
                 )
                 for _ in range(config.num_layers - 1)
@@ -146,7 +139,6 @@ class Task(mlfab.Task[Config]):
         py_xy = py_xy.to(x.device) / npy * 2 - 1 * self.config.period_scale
         pxy_xy2 = torch.stack([px_xy, py_xy], dim=-1)
         pxy_n2 = pxy_xy2[None].expand(bsz, npx, npy, 2).flatten(0, 2)
-        pxy_nt = self.xy_enc(pxy_n2.flatten()).unflatten(0, (-1, 2)).flatten(1, 2)
 
         # Gets the time and label embeddings.
         t_bt = self.time_enc(t)
@@ -154,7 +146,7 @@ class Task(mlfab.Task[Config]):
         l_bt = self.label_enc(labels)
         l_nt = l_bt[:, None, None, :].expand(bsz, npx, npy, -1).flatten(0, 2)
         x_n1 = x.flatten(0, 2).unsqueeze(1)
-        x_nt = torch.cat([x_n1, pxy_nt, t_nt, l_nt], dim=-1)
+        x_nt = torch.cat([x_n1, pxy_n2, t_nt, l_nt], dim=-1)
 
         # Runs the model.
         dx_nt = self.model(x_nt)
@@ -166,9 +158,7 @@ class Task(mlfab.Task[Config]):
         letters, labels = batch
         loss = self.diff.loss(
             functools.partial(self.diffusion_step, labels=labels),
-            letters,
-            state.num_steps,
-            loss="mse",
+            letters
         )
         self.log_step(batch, loss, state)
         return loss
@@ -183,7 +173,7 @@ class Task(mlfab.Task[Config]):
             model=functools.partial(self.diffusion_step, labels=labels),
             shape=shape,
             device=device,
-            num_steps=self.config.sampling_timesteps,
+            sampling_timesteps=self.config.sampling_timesteps,
         )[0]
         images_b1hw = images_bhw.unsqueeze(1)
 
