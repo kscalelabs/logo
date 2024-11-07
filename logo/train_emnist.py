@@ -157,7 +157,7 @@ class Task(mlfab.Task[Config]):
 
         # Encoder network
         self.model = nn.Sequential(
-            nn.Linear(1 + config.num_xy_enc + config.num_time_enc + config.num_label_enc, config.hidden_dims),
+            nn.Linear(1 + 2 * config.num_xy_enc + config.num_time_enc + config.num_label_enc, config.hidden_dims),
             act(),
             *(
                 nn.Sequential(
@@ -185,7 +185,7 @@ class Task(mlfab.Task[Config]):
         py_xy = py_xy.to(x.device) / npy * 2 - 1 * self.config.period_scale
         pxy_xy2 = torch.stack([px_xy, py_xy], dim=-1)
         pxy_n2 = pxy_xy2[None].expand(bsz, npx, npy, 2).flatten(0, 2)
-        pxy_nt = self.xy_enc(pxy_n2)
+        pxy_nt = self.xy_enc(pxy_n2.flatten()).unflatten(0, (-1, 2)).flatten(1, 2)
 
         # Gets the time and label embeddings.
         t_bt = self.time_enc(t)
